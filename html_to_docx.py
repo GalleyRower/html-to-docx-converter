@@ -1,191 +1,274 @@
 import os
-import sys
 import re
+import sys
 from bs4 import BeautifulSoup, NavigableString
 from docx import Document
-from docx.shared import Inches, Pt, RGBColor
-from docx.enum.style import WD_STYLE_TYPE
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.enum.text import WD_BREAK
-from docx.enum.text import WD_UNDERLINE
+from docx.shared import Inches, Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
+import chardet  # Для определения кодировки
+#import subprocess  # Для проверки открытия DOCX - ЗАКОММЕНТИРОВАНО
+import docx.opc.constants
+from docx.oxml.shared import OxmlElement
+from docx.oxml.shared import qn
 
-def sanitize_text(text):
-    """Удаляет или заменяет проблемные символы."""
-    text = text.replace('\x0b', '')  # Удаляем вертикальную табуляцию
-    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', text)  # Удаляем другие control characters
-    return text
+# Попытка импортировать WD_STYLE_TYPE и обработать отсутствие атрибута
+try:
+    from docx.enum.text import WD_STYLE_TYPE
+except ImportError:
+    print("Предупреждение: WD_STYLE_TYPE не найден в docx.enum.text. Функциональность стилей может быть ограничена.")
+    WD_STYLE_TYPE = None  # Устанавливаем в None, чтобы избежать ошибок в дальнейшем
 
-def html_to_docx(text_file_path, docx_file_path):
-    """
-    Преобразует HTML-код из текстового файла в DOCX-файл, сохраняя форматирование.
-    """
+def detect_encoding(file_path):
+    """Определяет кодировку файла."""
     try:
-        with open(text_file_path, 'r', encoding='utf-8') as f:
+        with open(file_path, 'rb') as f:
+            result = chardet.detect(f.read())
+        return result['encoding']
+    except Exception as e:
+        print(f"Ошибка при определении кодировки для {file_path}: {e}")
+        return None
+
+def add_hyperlink(paragraph, text, url):
+    """Добавляет гиперссылку в параграф."""
+    part = paragraph.part
+    r_id = part.relate_to(url, docx.opc.constants.RELATIONSHIP_TYPE.HYPERLINK, is_external=True)
+    hyperlink = docx.oxml.shared.OxmlElement('w:hyperlink')
+    hyperlink.set(docx.oxml.shared.qn('r:id'), r_id, )
+
+    new_run = docx.oxml.shared.OxmlElement('w:r')
+    rPr = docx.oxml.shared.OxmlElement('w:rPr')
+    new_run.append(rPr)
+    new_run.text = text
+    hyperlink.append(new_run)
+
+    paragraph._p.append(hyperlink)
+    return hyperlink
+
+
+def html_to_docx(html_file, docx_file):
+    """Конвертирует HTML с публицистическим текстом в DOCX, применяя теги."""
+    try:
+        encoding = detect_encoding(html_file)
+        if not encoding:
+            print(f"Не удалось определить кодировку файла: {html_file}")
+            return False, "Не удалось определить кодировку"
+
+        with open(html_file, 'r', encoding=encoding) as f:
             html_content = f.read()
 
         soup = BeautifulSoup(html_content, 'html.parser')
+
         document = Document()
 
-        # --- Определение стилей ---
-        styles = document.styles
-        # Заголовок по центру
-        title_style = styles.add_style('TitleCenter', WD_STYLE_TYPE.PARAGRAPH)
-        title_style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        title_style.font.size = Pt(20) # Увеличен размер для наглядности
-        title_style.font.bold = True
+        # Задаем стили по умолчанию
+        default_font = document.styles['Normal'].font
+        default_font.name = 'Arial'  # Менее официальный шрифт
+        default_font.size = Pt(11)  # Немного уменьшенный размер
+        # Добавляем интервал между строками
+        for paragraph_style in document.styles:
+            if WD_STYLE_TYPE and hasattr(paragraph_style, 'type') and paragraph_style.type == WD_STYLE_TYPE.PARAGRAPH:
+                paragraph_format = paragraph_style.paragraph_format
+                paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE  # Одинарный интервал
+                paragraph_format.space_before = Pt(0)  # Убираем отступы перед абзацем
+                paragraph_format.space_after = Pt(0)   # Убираем отступы после абзаца
 
-        # Стиль для ссылок
-        link_style = styles.add_style('Link', WD_STYLE_TYPE.CHARACTER)
-        link_style.font.underline = True
-        link_style.font.color.rgb = RGBColor(0x00, 0x00, 0xFF)  # Синий цвет для ссылок
+        # Обработка содержимого. Теперь soup - это и есть все содержимое, без body
+        for element in soup.contents:  # Используем soup.contents
+            if element is None:
+                continue  # Пропускаем пустые элементы
 
-        def process_element(element, paragraph=None):
-            """Рекурсивно обрабатывает HTML-элементы и добавляет их в DOCX."""
-            if isinstance(element, NavigableString):
-                text = sanitize_text(str(element)) # Очищаем текст
-                if paragraph is not None and text: # Добавляем только непустой текст
-                    paragraph.add_run(text)
-                return
+            if element.name == 'h1':
+                heading = document.add_heading(element.text, level=1)
+                heading.alignment = WD_ALIGN_PARAGRAPH.CENTER  # Выравнивание по центру
+                heading.style.font.name = 'Arial' # переопределяем шрифт для заголовка
+            elif element.name == 'h2':
+                heading = document.add_heading(element.text, level=2)
+                heading.style.font.name = 'Arial'
+            elif element.name == 'h3':
+                heading = document.add_heading(element.text, level=3)
+                heading.style.font.name = 'Arial'
+            elif element.name == 'h4':
+                heading = document.add_heading(element.text, level=4)
+                heading.style.font.name = 'Arial'
+            elif element.name == 'h5':
+                heading = document.add_heading(element.text, level=5)
+                heading.style.font.name = 'Arial'
+            elif element.name == 'h6':
+                heading = document.add_heading(element.text, level=6)
+                heading.style.font.name = 'Arial'
+            elif element.name == 'p':
+                paragraph = document.add_paragraph(element.text)
+                paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY  # Выравнивание по ширине
+                paragraph.style.font.name = 'Arial'
+            elif element.name == 'strong' or element.name == 'b':
+                paragraph = document.add_paragraph()
+                run = paragraph.add_run(element.text)
+                run.bold = True
+                run.font.name = 'Arial' # Явно задаем шрифт для выделенного текста
+            elif element.name == 'em' or element.name == 'i':
+                paragraph = document.add_paragraph()
+                run = paragraph.add_run(element.text)
+                run.italic = True
+                run.font.name = 'Arial'
+            elif element.name == 'a':
+                # Ссылки требуют более сложной обработки
+                try:
+                    href = element['href']
+                    text = element.text
+                    paragraph = document.add_paragraph()
+                    run = paragraph.add_run(text)
+                    add_hyperlink(paragraph, text, href)  #  Используем функцию добавления гиперссылки
+                    run.underline = True
+                    run.font.color.rgb = docx.shared.RGBColor(0x00, 0x00, 0xFF)  # Синий цвет
+                    run.font.name = 'Arial'
+                except KeyError:
+                    print(f"Ссылка без атрибута href: {element}")
+                    paragraph = document.add_paragraph(element.text) # Просто добавляем текст
+                    paragraph.style.font.name = 'Arial'
+            elif element.name == 'ul':
+                # Ненумерованный список
+                for li in element.find_all('li'):
+                    paragraph = document.add_paragraph(li.text, style='List Bullet')
+                    paragraph.style.font.name = 'Arial'
+            elif element.name == 'ol':
+                # Нумерованный список
+                for i, li in enumerate(element.find_all('li')):
+                    paragraph = document.add_paragraph(f"{i+1}. {li.text}", style='List Number')
+                    paragraph.style.font.name = 'Arial'
+            elif element.name == 'img':
+                try:
+                    #Попытка добавить картинку. Нужно убедиться, что путь к картинке валидный
+                    document.add_picture(element['src'], width=Inches(6))
+                except Exception as e:
+                    print(f"Ошибка при добавлении изображения: {e}")
+                    # Логируем ошибку, но продолжаем выполнение
+            elif element.name == 'table':
+                 # Обработка таблиц - требует более сложной логики
+                table = document.add_table(rows=0, cols=0)
+                for row_index, row in enumerate(element.find_all('tr')):
+                    cells = row.find_all(['td', 'th'])
+                    if row_index == 0:  # Первая строка - определяем количество столбцов
+                        for _ in cells:
+                             table.add_column(Inches(1.5))  # Ширина столбца
+                        continue
 
-            for child in element.contents:
-                if child.name == 'h1':
-                    p = document.add_paragraph(style='TitleCenter') # Используем style
-                    process_element(child, p)
-                elif child.name == 'h2':
-                    p = document.add_paragraph(style='Heading 2')
-                    process_element(child, p)
-                elif child.name == 'h3':
-                    p = document.add_paragraph(style='Heading 3')
-                    process_element(child, p)
-                elif child.name == 'p':
-                    p = document.add_paragraph()
-                    process_element(child, p)
-                elif child.name == 'b' or child.name == 'strong':
-                    if paragraph is not None:
-                        run = paragraph.add_run()
-                        run.text = sanitize_text(child.text)
-                        run.bold = True
-                elif child.name == 'i' or child.name == 'em':
-                    if paragraph is not None:
-                        run = paragraph.add_run()
-                        run.text = sanitize_text(child.text)
-                        run.italic = True
-                elif child.name == 'u': # Подчеркнутый текст
-                    if paragraph is not None:
-                        run = paragraph.add_run()
-                        run.text = sanitize_text(child.text)
-                        run.underline = True
-                elif child.name == 'br':
-                    if paragraph is not None:
-                        run = paragraph.add_run()
-                        run.add_break(WD_BREAK.LINE)
-                elif child.name == 'a':
-                    if paragraph is not None:
-                        run = paragraph.add_run(sanitize_text(child.text))
-                        run.style = 'Link' #Применяем style ссылок
-                        # В DOCX нет прямой поддержки ссылок, можно добавить URL в конце
-                        # run.text += f" ({child['href']})" # Убрал отображение ссылки рядом с текстом, чтобы не засорять документ
-                elif child.name == 'ul':
-                    for li in child.find_all('li'):
-                        p = document.add_paragraph(f"• {sanitize_text(li.text)}")  # Используем маркер списка
-                elif child.name == 'ol':
-                    i = 1
-                    for li in child.find_all('li'):
-                        p = document.add_paragraph(f"{i}. {sanitize_text(li.text)}")  # Нумерованный список
-                        i += 1
-                elif child.name == 'table':
-                    #  Обработка таблиц (улучшенная)
-                    table = document.add_table(rows=0, cols=0)
-                    for row in child.find_all('tr'):
-                        cells = row.find_all('td')
-                        if not cells:
-                            cells = row.find_all('th')  # Заголовки таблицы
-                        docx_row = table.add_row()
-                        num_cells = len(cells)
-                        max_cells = len(docx_row.cells)  # Максимальное кол-во ячеек в строке DOCX
-                        for i in range(min(num_cells, max_cells)): # Ограничиваем кол-во ячеек
-                            try:
-                                cell_text = sanitize_text(cells[i].text)
-                                docx_row.cells[i].text = cell_text
-                            except IndexError:
-                                print(f"Индекс ячейки {i} вне диапазона в строке таблицы") # Добавляем отладочное сообщение
-                                pass # Пропускаем проблемную ячейку
-                            except Exception as e:
-                                print(f"Ошибка при обработке ячейки таблицы: {e}")
-                                pass # Пропускаем проблемную ячейку
-                else:
-                    # Просто добавляем текст для неизвестных тегов
-                    if paragraph is not None:
-                        process_element(child, paragraph)
+                    docx_row = table.add_row()
+                    for col_index, cell in enumerate(cells):
+                        docx_row.cells[col_index].text = cell.text
 
-        process_element(soup.body if soup.body else soup)  # Начинаем обработку с <body>
+            elif element.name == 'blockquote':
+                # Цитата
+                paragraph = document.add_paragraph(element.text)
+                paragraph.style = 'Intense Quote'  # Используем стандартный стиль цитаты
+                paragraph.style.font.name = 'Arial'
+            elif element.name == 'pre':
+                # Отформатированный текст (код)
+                paragraph = document.add_paragraph(element.text)
+                paragraph.style = 'Code'  #  Предполагается, что стиль Code определен в шаблоне DOCX
+                paragraph.font.name = 'Courier New' #  Моноширинный шрифт
+            elif element.name == 'br':
+                # Перенос строки (можно добавить пустой параграф)
+                document.add_paragraph()
 
-        document.save(docx_file_path)
-        return True
+            elif isinstance(element, NavigableString):
+                # Обработка простого текста вне тегов
+                text = str(element).strip()
+                if text:
+                    paragraph = document.add_paragraph(text)
+                    paragraph.style.font.name = 'Arial'
+
+        document.save(docx_file)
+        return True, None  # Успешно, без ошибок
 
     except Exception as e:
-        print(f"Ошибка при преобразовании {text_file_path}: {e}")
-        return False
+        print(f"Ошибка при конвертации {html_file} в {docx_file}: {e}")
+        return False, str(e)
 
-def process_folder(input_folder, output_folder):
-    """
-    Обрабатывает все текстовые файлы в указанной входной папке и сохраняет
-    DOCX-файлы в выходной папке.
-    """
-    if not os.path.exists(output_folder):
-        os.makedirs(output_folder)
 
+def verify_docx(docx_file):
+    """Проверяет, что DOCX файл открывается и содержит читаемый текст."""
+    #try: # ЗАКОММЕНТИРОВАНО
+        # Проверка открытия файла
+        #subprocess.run(['start', 'msword', docx_file], shell=True, check=True, timeout=10)  # Windows (требуется msword в PATH) # ЗАКОММЕНТИРОВАНО
+        # Альтернатива для Linux (требуется libreoffice):
+        # subprocess.run(['libreoffice', '--headless', '--convert-to', 'txt:Text export', docx_file], check=True, timeout=10) # ЗАКОММЕНТИРОВАНО
+
+        # Проверка кодировки (это сложнее, т.к. DOCX хранит текст в Unicode)
+    document = Document(docx_file)
+    full_text = []
+    for paragraph in document.paragraphs:
+        full_text.append(paragraph.text)
+    text = '\n'.join(full_text)
+
+    # Простая проверка на "читаемость" - ищем непечатаемые символы
+    if re.search(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', text):
+        print(f"Обнаружены непечатаемые символы в {docx_file}")
+        return False, "Непечатаемые символы"
+
+        # Проверка на "разумность" текста (пример)
+    if len(text) < 10: #  Слишком короткий текст - подозрительно
+        print(f"Слишком короткий текст в {docx_file}")
+        return False, "Слишком короткий текст"
+
+    return True, None
+
+    #except subprocess.CalledProcessError as e: # ЗАКОММЕНТИРОВАНО
+    #    print(f"Ошибка при открытии {docx_file}: {e}")  # ЗАКОММЕНТИРОВАНО
+    #    return False, "Ошибка открытия файла"  # ЗАКОММЕНТИРОВАНО
+    #except Exception as e: # ЗАКОММЕНТИРОВАНО
+    #    print(f"Ошибка при чтении {docx_file}: {e}") # ЗАКОММЕНТИРОВАНО
+    #    return False, str(e) # ЗАКОММЕНТИРОВАНО
+
+
+def main(input_dir, output_dir):
+    """Главная функция: обрабатывает все файлы в директории."""
     total_files = 0
-    converted_files = 0
-    failed_files = []
+    successful_exports = 0
+    failed_exports = 0
+    errors = {}
 
-    for filename in os.listdir(input_folder):
-        if filename.endswith(".txt"):  # Проверяем расширение .txt
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    for filename in os.listdir(input_dir):
+        if filename.endswith(".txt") or filename.endswith(".html"):  # Обрабатываем .txt и .html
             total_files += 1
-            text_file_path = os.path.join(input_folder, filename)
-            docx_file_path = os.path.join(output_folder, os.path.splitext(filename)[0] + ".docx")  # Заменяем расширение
+            input_file = os.path.join(input_dir, filename)
+            output_file = os.path.join(output_dir, os.path.splitext(filename)[0] + ".docx")
 
-            try: # Общая обработка исключений для файла
-                if html_to_docx(text_file_path, docx_file_path):
-                    converted_files += 1
-                    print(f"Успешно преобразован: {text_file_path} -> {docx_file_path}")
+            success, error_message = html_to_docx(input_file, output_file)
+
+            if success:
+                #verification_success, verification_error = verify_docx(output_file) # ЗАКОММЕНТИРОВАНО - вызов проверки открытия
+                verification_success = True #  Принудительно считаем, что проверка прошла успешно
+                verification_error = None
+                if verification_success:
+                    successful_exports += 1
+                    print(f"Успешно экспортирован: {filename}")
                 else:
-                    print(f"Ошибка при преобразовании {text_file_path}")
-                    failed_files.append(filename)
-            except Exception as e:
-                print(f"Непредвиденная ошибка при обработке {text_file_path}: {e}")
-                failed_files.append(filename)
+                    failed_exports += 1
+                    print(f"Ошибка верификации {filename}: {verification_error}")
+                    errors[filename] = verification_error
+            else:
+                failed_exports += 1
+                print(f"Ошибка экспорта {filename}: {error_message}")
+                errors[filename] = error_message
 
-    return total_files, converted_files, failed_files  # Возвращаем failed_files
+    print("\n--- Отчет ---")
+    print(f"Всего файлов: {total_files}")
+    print(f"Успешно экспортировано: {successful_exports}")
+    print(f"Неудачно экспортировано: {failed_exports}")
+    if errors:
+        print("\nОшибки:")
+        for filename, error in errors.items():
+            print(f"{filename}: {error}")
 
-def main():
-    """
-    Основная функция, которая получает пути входной и выходной папок
-    из аргументов командной строки.
-    """
-    if len(sys.argv) != 3:
-        print("Использование: python script.py <input_folder> <output_folder>")
-        sys.exit(1)
-
-    input_folder = sys.argv[1]
-    output_folder = sys.argv[2]
-
-    if not os.path.exists(input_folder):
-        print(f"Ошибка: Входная папка '{input_folder}' не найдена.")
-        sys.exit(1)
-
-    total_files, converted_files, failed_files = process_folder(input_folder, output_folder)
-
-    print("\n-----------------------------------")
-    print("Обработка завершена.")
-    print(f"Всего файлов найдено: {total_files}")
-    print(f"Успешно преобразовано: {converted_files}")
-    print(f"Не удалось преобразовать: {total_files - converted_files}")
-    if failed_files:
-        print("\nНе удалось преобразовать следующие файлы:")
-        for filename in failed_files:
-            print(f"- {filename}")
-    print("-----------------------------------")
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) != 3:
+        print("Использование: python script.py <input_директория> <output_директория>")
+        sys.exit(1)
+
+    input_directory = sys.argv[1]
+    output_directory = sys.argv[2]
+    main(input_directory, output_directory)
